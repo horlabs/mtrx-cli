@@ -142,7 +142,11 @@ class CommandHandler:
             )
 
         if group_id:
-            room_id = group_id
+            if group_id.startswith(("!", "#")):
+                room_id = group_id
+            else:
+                # Some clients pass DM recipients via groupId. Resolve those to a DM room.
+                room_id = await self.backend.resolve_recipient_to_room(group_id)
         elif recipients:
             room_id = await self.backend.resolve_recipient_to_room(recipients[0])
         else:
@@ -173,7 +177,7 @@ class CommandHandler:
         while True:
             try:
                 msg = self.backend.message_queue.get_nowait()
-                envelopes.append(_msg_to_envelope(msg))
+                envelopes.append(_msg_to_envelope(msg, self.account))
             except asyncio.QueueEmpty:
                 break
 
@@ -186,7 +190,7 @@ class CommandHandler:
                 msg = await asyncio.wait_for(
                     self.backend.message_queue.get(), timeout=min(remaining, 1.0)
                 )
-                envelopes.append(_msg_to_envelope(msg))
+                envelopes.append(_msg_to_envelope(msg, self.account))
             except asyncio.TimeoutError:
                 # Keep polling until the full timeout has elapsed.
                 continue
@@ -199,7 +203,7 @@ class CommandHandler:
             while True:
                 try:
                     msg = self.backend.message_queue.get_nowait()
-                    envelopes.append(_msg_to_envelope(msg))
+                    envelopes.append(_msg_to_envelope(msg, self.account))
                 except asyncio.QueueEmpty:
                     break
         return envelopes
