@@ -38,6 +38,11 @@ logger = logging.getLogger(__name__)
 JSONRPC = "2.0"
 
 
+def _log_wire_out(channel: str, target: str, text: str) -> None:
+    """Log exact outgoing wire payload (including framing/newlines)."""
+    logger.debug("OUT [%s -> %s] %r", channel, target, text)
+
+
 def _ok(id_: Any, result: Any) -> dict:
     return {"jsonrpc": JSONRPC, "id": id_, "result": result}
 
@@ -53,7 +58,7 @@ def _notification(method: str, params: Any) -> dict:
     return {"jsonrpc": JSONRPC, "method": method, "params": params}
 
 
-def _msg_to_envelope(msg: IncomingMessage) -> dict:
+def _msg_to_envelope(msg: IncomingMessage, account: str) -> dict:
     """Convert IncomingMessage → signal-cli envelope notification format."""
     envelope: dict[str, Any] = {
         "timestamp": msg.timestamp,
@@ -74,7 +79,7 @@ def _msg_to_envelope(msg: IncomingMessage) -> dict:
             "type": "DELIVER",
         }
     envelope["dataMessage"] = data_message
-    return {"envelope": envelope, "account": "matrix"}
+    return {"envelope": envelope, "account": account}
 
 
 class JsonRpcServer:
@@ -140,20 +145,26 @@ class JsonRpcServer:
                 req = json.loads(line)
             except json.JSONDecodeError as e:
                 parse_error = _err(None, -32700, f"Parse error: {e}")
-                sys.stdout.write(json.dumps(parse_error) + "\n")
+                line_out = json.dumps(parse_error) + "\n"
+                _log_wire_out("stdio", "stdout", line_out)
+                sys.stdout.write(line_out)
                 sys.stdout.flush()
                 continue
 
             response = await self.dispatch(req)
             if response is not None:
-                sys.stdout.write(json.dumps(response) + "\n")
+                line_out = json.dumps(response) + "\n"
+                _log_wire_out("stdio", "stdout", line_out)
+                sys.stdout.write(line_out)
                 sys.stdout.flush()
 
     async def _forward_notifications_stdio(self) -> None:
         while True:
             msg: IncomingMessage = await self.backend.message_queue.get()
-            notif = _notification("receive", _msg_to_envelope(msg))
-            sys.stdout.write(json.dumps(notif) + "\n")
+            notif = _notification("receive", _msg_to_envelope(msg, self.account))
+            line_out = json.dumps(notif) + "\n"
+            _log_wire_out("stdio", "stdout", line_out)
+            sys.stdout.write(line_out)
             sys.stdout.flush()
 
     # ------------------------------------------------------------------
@@ -165,15 +176,20 @@ class JsonRpcServer:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
+        peer = writer.get_extra_info("peername")
+        peer_name = str(peer) if peer is not None else "unknown"
+
         async def send(obj: dict) -> None:
-            writer.write((json.dumps(obj) + "\n").encode())
+            line_out = json.dumps(obj) + "\n"
+            _log_wire_out("socket", peer_name, line_out)
+            writer.write(line_out.encode())
             await writer.drain()
 
         # Push incoming Matrix messages to this client
         async def push_loop() -> None:
             while True:
                 msg = await self.backend.message_queue.get()
-                notif = _notification("receive", _msg_to_envelope(msg))
+                notif = _notification("receive", _msg_to_envelope(msg, self.account))
                 try:
                     await send(notif)
                 except Exception:
@@ -319,9 +335,11 @@ class JsonRpcServer:
         )
         await response.prepare(request)
 
-        # Initial ping so clients can confirm the stream is open.
-        await response.write(b": connected\n\n")
-        logger.debug("SSE connected message sent to %s", client_addr)
+        # signal-cli style: keepalive comment line.
+        frame = ":\n"
+        _log_wire_out("sse", client_addr, frame)
+        await response.write(frame.encode())
+        logger.debug("SSE initial keepalive sent to %s", client_addr)
 
         keepalive_count = 0
         try:
@@ -346,13 +364,16 @@ class JsonRpcServer:
                             client_addr,
                             self.backend.message_queue.qsize(),
                         )
-                    await response.write(b": keepalive\n\n")
+                    frame = ":\n"
+                    _log_wire_out("sse", client_addr, frame)
+                    await response.write(frame.encode())
                     continue
 
-                notif = _notification("receive", _msg_to_envelope(msg))
-                payload = json.dumps(notif, separators=(",", ":"))
-                logger.debug("SSE output to %s: %s", client_addr, payload)
-                await response.write(f"data: {payload}\n\n".encode())
+                payload_obj = _msg_to_envelope(msg, self.account)
+                payload = json.dumps(payload_obj, separators=(",", ":"))
+                frame = f"event: receive\ndata: {payload}\n\n"
+                _log_wire_out("sse", client_addr, frame)
+                await response.write(frame.encode())
         except (asyncio.CancelledError, ConnectionResetError, RuntimeError) as e:
             logger.debug(
                 "SSE client %s disconnected: %s", client_addr, type(e).__name__
