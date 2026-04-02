@@ -115,6 +115,19 @@ class MatrixBackend:
         if self._access_token:
             self.client.access_token = self._access_token
             self.client.user_id = self.user_id
+            whoami = await self.client.whoami()
+            whoami_user = getattr(whoami, "user_id", None)
+            if not whoami_user:
+                detail = getattr(whoami, "message", "unknown error")
+                raise RuntimeError(
+                    "Matrix access token validation failed. "
+                    f"Check homeserver URL and token. Details: {detail}"
+                )
+            if whoami_user != self.user_id:
+                raise RuntimeError(
+                    "Matrix access token belongs to a different user. "
+                    f"Configured: {self.user_id}, token user: {whoami_user}"
+                )
             self._logged_in = True
             logger.info("Logged in via access token")
             return
@@ -334,6 +347,11 @@ class MatrixBackend:
 
     async def start_daemon(self) -> None:
         """Start background sync loop, feeding IncomingMessages into queue."""
+        if self._sync_task and not self._sync_task.done():
+            logger.debug("Sync daemon already running")
+            return
+
+        logger.info("Starting sync daemon")
         self._sync_task = asyncio.create_task(self._sync_loop())
         logger.info("Matrix sync daemon started")
 
@@ -346,7 +364,14 @@ class MatrixBackend:
                 pass
 
     async def _sync_loop(self) -> None:
-        await self.client.sync_forever(timeout=30_000, full_state=True)
+        try:
+            logger.info("Sync loop starting")
+            await self.client.sync_forever(timeout=30_000, full_state=True)
+        except asyncio.CancelledError:
+            logger.info("Sync loop cancelled")
+            raise
+        except Exception as e:
+            logger.error("Sync loop crashed: %s", e, exc_info=True)
 
     async def sync_once(
         self,
@@ -393,6 +418,12 @@ class MatrixBackend:
         if event.sender == self.user_id:
             return  # skip own messages
         msg = self._make_incoming(room, event.sender, event.body)
+        logger.debug(
+            "Message callback: queuing text from %s in room %s: %s",
+            event.sender,
+            room.room_id,
+            event.body[:50],
+        )
         await self.message_queue.put(msg)
 
     async def _on_message_file(self, room: MatrixRoom, event: RoomMessageFile) -> None:
@@ -407,6 +438,9 @@ class MatrixBackend:
             "url": mxc,
         }
         msg = self._make_incoming(room, event.sender, event.body, [att])
+        logger.debug(
+            "Message callback: queuing file from %s: %s", event.sender, event.body
+        )
         await self.message_queue.put(msg)
 
     async def _on_message_image(
@@ -417,6 +451,9 @@ class MatrixBackend:
         mxc = getattr(event, "url", "")
         att = {"contentType": "image/jpeg", "filename": event.body, "url": mxc}
         msg = self._make_incoming(room, event.sender, event.body, [att])
+        logger.debug(
+            "Message callback: queuing image from %s: %s", event.sender, event.body
+        )
         await self.message_queue.put(msg)
 
     async def _on_invite(self, room: MatrixRoom, event: InviteEvent) -> None:

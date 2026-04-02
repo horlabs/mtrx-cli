@@ -6,7 +6,11 @@ Implements the signal-cli JSON-RPC daemon interface.
 Modes (identical to signal-cli):
   --socket [PATH]   UNIX-domain socket
   --tcp [HOST:PORT] TCP socket           (default localhost:7583)
-  --http [HOST:PORT] HTTP endpoint at /api/v1/rpc  (default localhost:8080)
+    --http [HOST:PORT] HTTP endpoints:
+                                        POST /api/v1/rpc    JSON-RPC (single + batch)
+                                        GET  /api/v1/events SSE stream for incoming messages
+                                        GET  /api/v1/check  health check (200 when running)
+                                        default localhost:8080
 
 Wire format: newline-delimited JSON (same as signal-cli):
   Request:  {"jsonrpc":"2.0","id":1,"method":"send","params":{...}}
@@ -26,8 +30,8 @@ from typing import Any, Callable, Coroutine
 
 from aiohttp import web
 
-from .matrix_backend import MatrixBackend, IncomingMessage
 from .command_handler import CommandHandler
+from .matrix_backend import IncomingMessage, MatrixBackend
 
 logger = logging.getLogger(__name__)
 
@@ -92,13 +96,17 @@ class JsonRpcServer:
 
         # Notification (no id) → fire and forget
         if req_id is None and method:
+            logger.debug("JSON-RPC notification: %s", method)
             asyncio.create_task(self.handler.handle(method, params, self.account))
             return None
 
         try:
+            logger.debug("JSON-RPC request: id=%s method=%s", req_id, method)
             result = await self.handler.handle(method, params, self.account)
+            logger.debug("JSON-RPC response: id=%s", req_id)
             return _ok(req_id, result)
         except NotImplementedError as e:
+            logger.warning("JSON-RPC method not found: %s", method)
             return _err(req_id, -32601, f"Method not found: {method}", str(e))
         except Exception as e:  # noqa: BLE001
             logger.exception("Error handling %s", method)
@@ -131,14 +139,14 @@ class JsonRpcServer:
             try:
                 req = json.loads(line)
             except json.JSONDecodeError as e:
-                resp = _err(None, -32700, f"Parse error: {e}")
-                sys.stdout.write(json.dumps(resp) + "\n")
+                parse_error = _err(None, -32700, f"Parse error: {e}")
+                sys.stdout.write(json.dumps(parse_error) + "\n")
                 sys.stdout.flush()
                 continue
 
-            resp = await self.dispatch(req)
-            if resp is not None:
-                sys.stdout.write(json.dumps(resp) + "\n")
+            response = await self.dispatch(req)
+            if response is not None:
+                sys.stdout.write(json.dumps(response) + "\n")
                 sys.stdout.flush()
 
     async def _forward_notifications_stdio(self) -> None:
@@ -220,7 +228,13 @@ class JsonRpcServer:
         await self.backend.start_daemon()
 
         app = web.Application()
+        # signal-cli-compatible HTTP endpoints + compatibility aliases.
         app.router.add_post("/api/v1/rpc", self._http_handler)
+        app.router.add_post("/api/v1/rpc/", self._http_handler)
+        app.router.add_post("/", self._http_handler)
+        app.router.add_get("/api/v1/events", self._http_events)
+        app.router.add_get("/api/v1/check", self._http_check)
+        app.router.add_get("/", self._http_index)
 
         runner = web.AppRunner(app)
         await runner.setup()
@@ -240,9 +254,116 @@ class JsonRpcServer:
         try:
             req = await request.json()
         except Exception as e:
-            return web.json_response(_err(None, -32700, f"Parse error: {e}"), status=400)
+            logger.debug("JSON parse error: %s", e)
+            return web.json_response(
+                _err(None, -32700, f"Parse error: {e}"), status=400
+            )
 
-        resp = await self.dispatch(req)
-        if resp is None:
+        # Support JSON-RPC single and batch requests.
+        if isinstance(req, list):
+            if not req:
+                return web.json_response(
+                    _err(None, -32600, "Invalid Request"), status=400
+                )
+
+            logger.debug("JSON-RPC batch request: %d items", len(req))
+            responses: list[dict] = []
+            for item in req:
+                if not isinstance(item, dict):
+                    responses.append(_err(None, -32600, "Invalid Request"))
+                    continue
+                response = await self.dispatch(item)
+                if response is not None:
+                    responses.append(response)
+
+            if not responses:
+                return web.Response(status=204)
+            return web.json_response(responses)
+
+        if not isinstance(req, dict):
+            return web.json_response(_err(None, -32600, "Invalid Request"), status=400)
+
+        method = req.get("method", "")
+        logger.debug("JSON-RPC request: method=%s", method)
+        response = await self.dispatch(req)
+        if response is None:
             return web.Response(status=204)
-        return web.json_response(resp)
+        return web.json_response(response)
+
+    async def _http_check(self, request: web.Request) -> web.Response:
+        return web.Response(status=200, text="OK")
+
+    async def _http_events(self, request: web.Request) -> web.StreamResponse:
+        client_addr = request.remote or "unknown"
+        logger.debug(
+            "SSE client connected: %s, queue size: %d",
+            client_addr,
+            self.backend.message_queue.qsize(),
+        )
+
+        response = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+        await response.prepare(request)
+
+        # Initial ping so clients can confirm the stream is open.
+        await response.write(b": connected\n\n")
+        logger.debug("SSE connected message sent to %s", client_addr)
+
+        keepalive_count = 0
+        try:
+            while True:
+                try:
+                    msg: IncomingMessage = await asyncio.wait_for(
+                        self.backend.message_queue.get(), timeout=15.0
+                    )
+                    logger.debug(
+                        "SSE sending message to %s from %s: %s",
+                        client_addr,
+                        msg.sender,
+                        msg.body[:50],
+                    )
+                except asyncio.TimeoutError:
+                    # Keep the SSE stream active and visible for curl -N.
+                    keepalive_count += 1
+                    if keepalive_count % 4 == 0:  # Log every 4th keepalive (60s)
+                        logger.debug(
+                            "SSE keepalive #%d to %s, queue size: %d",
+                            keepalive_count,
+                            client_addr,
+                            self.backend.message_queue.qsize(),
+                        )
+                    await response.write(b": keepalive\n\n")
+                    continue
+
+                notif = _notification("receive", _msg_to_envelope(msg))
+                payload = json.dumps(notif, separators=(",", ":"))
+                await response.write(f"data: {payload}\n\n".encode())
+        except (asyncio.CancelledError, ConnectionResetError, RuntimeError) as e:
+            logger.debug(
+                "SSE client %s disconnected: %s", client_addr, type(e).__name__
+            )
+        finally:
+            try:
+                await response.write_eof()
+            except Exception:
+                pass
+            logger.debug("SSE stream ended for %s", client_addr)
+        return response
+
+    async def _http_index(self, request: web.Request) -> web.Response:
+        payload = {
+            "name": "matrix-signal-adapter",
+            "mode": "json-rpc",
+            "endpoints": {
+                "post": ["/api/v1/rpc", "/api/v1/rpc/", "/"],
+                "get": ["/api/v1/check", "/api/v1/events", "/"],
+            },
+        }
+        return web.json_response(payload)

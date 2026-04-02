@@ -48,8 +48,15 @@ EOF
 > **Tip:** Use `access_token` instead of `password` so your password is not stored on disk.  
 > You can get an access token from Element → Settings → Help & About → Access Token.
 
+> **Important:** `homeserver` must be the server base URL (for example `https://matrix.org`),
+> not a client API path like `.../_matrix/client/v3`.
+
 The config filename is derived from the account: `@` and `:` are replaced by `_`.  
 So `@alice:example.org` → `alice_example.org.json`.
+
+If you see warnings like `Error validating response: 'next_batch' is a required property`,
+the sync endpoint returned an error payload instead of a normal `/sync` response. Common
+causes are an invalid/expired `access_token` or an incorrect `homeserver` URL.
 
 ### 3. Use it
 
@@ -116,6 +123,15 @@ matrix-signal-adapter -a @you:matrix.org daemon --tcp localhost:7583
 matrix-signal-adapter -a @you:matrix.org daemon --http localhost:8080
 # POST JSON-RPC requests to: http://localhost:8080/api/v1/rpc
 ```
+
+Events stream (SSE):
+
+```bash
+curl -N http://localhost:8080/api/v1/events
+```
+
+You should immediately see `: connected` and then periodic `: keepalive` lines
+until real incoming events arrive as `data: {...}`.
 
 ---
 
@@ -209,6 +225,49 @@ Example request/response:
                                     │  (Synapse, etc.)   │
                                     └───────────────────┘
 ```
+
+---
+
+## Troubleshooting & Debug
+
+### Events stream not receiving messages after reconnect
+
+Enable debug logging to trace the sync loop and message queue:
+
+```bash
+matrix-signal-adapter -a @you:matrix.org daemon --http -v
+```
+
+The verbose flag enables `DEBUG` level logging. Look for messages like:
+- `SSE client connected: ...` (new connection open)
+- `Message callback: queuing ...` (incoming messages queued)
+- `SSE sending message to ...` (event sent to client)
+- `Sync loop starting / crashed` (background sync status)
+
+If sync loop crashes repeatedly, check the homeserver URL and access token are valid.
+
+### How to diagnose issues
+
+1. **Check daemon startup:**
+   ```bash
+   matrix-signal-adapter -a @you:matrix.org daemon --http -v 2>&1 | head -50
+   ```
+
+2. **Test events stream in one terminal:**
+   ```bash
+   curl -N http://localhost:8080/api/v1/events
+   ```
+   Should show `: connected` immediately, then `: keepalive` every 15s.
+
+3. **Send a test message in another terminal:**
+   ```bash
+   matrix-signal-adapter -a @you:matrix.org send bob -m "test"
+   ```
+   
+   The events stream should show the received message (or check logs for why it didn't).
+
+4. **Check Matrix account directly:**
+   Use Element (Matrix client) to verify messages are actually arriving at the homeserver.
 
 ---
 
