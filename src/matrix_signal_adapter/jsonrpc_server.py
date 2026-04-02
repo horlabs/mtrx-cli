@@ -266,7 +266,9 @@ class JsonRpcServer:
                     _err(None, -32600, "Invalid Request"), status=400
                 )
 
-            logger.debug("JSON-RPC batch request: %d items", len(req))
+            logger.debug(
+                "JSON-RPC batch request: %s", json.dumps(req, separators=(",", ":"))
+            )
             responses: list[dict] = []
             for item in req:
                 if not isinstance(item, dict):
@@ -278,16 +280,21 @@ class JsonRpcServer:
 
             if not responses:
                 return web.Response(status=204)
+            resp_json = json.dumps(responses, separators=(",", ":"))
+            logger.debug("JSON-RPC batch response: %s", resp_json)
             return web.json_response(responses)
 
         if not isinstance(req, dict):
             return web.json_response(_err(None, -32600, "Invalid Request"), status=400)
 
         method = req.get("method", "")
-        logger.debug("JSON-RPC request: method=%s", method)
+        req_json = json.dumps(req, separators=(",", ":"))
+        logger.debug("JSON-RPC request: %s", req_json)
         response = await self.dispatch(req)
         if response is None:
             return web.Response(status=204)
+        resp_json = json.dumps(response, separators=(",", ":"))
+        logger.debug("JSON-RPC response: %s", resp_json)
         return web.json_response(response)
 
     async def _http_check(self, request: web.Request) -> web.Response:
@@ -344,6 +351,7 @@ class JsonRpcServer:
 
                 notif = _notification("receive", _msg_to_envelope(msg))
                 payload = json.dumps(notif, separators=(",", ":"))
+                logger.debug("SSE output to %s: %s", client_addr, payload)
                 await response.write(f"data: {payload}\n\n".encode())
         except (asyncio.CancelledError, ConnectionResetError, RuntimeError) as e:
             logger.debug(

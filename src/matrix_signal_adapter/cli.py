@@ -380,6 +380,10 @@ def main() -> None:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
 
+    # Suppress nio schema validation warnings (next_batch, etc.)
+    logging.getLogger("nio.responses").setLevel(logging.WARNING)
+    logging.getLogger("nio").setLevel(logging.WARNING)
+
     asyncio.run(_run(args))
 
 

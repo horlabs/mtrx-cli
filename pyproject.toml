@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "matrix-signal-adapter"
-version = "0.1.0"
+version = "0.2.0"
 description = "A drop-in signal-cli replacement backed by Matrix Chat"
 readme = "README.md"
 license = { text = "MIT" }
@@ -18,15 +18,11 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
 ]
-dependencies = [
-    "matrix-nio>=0.25",
-    "aiohttp>=3.9",
-    "aiofiles>=23.0",
-]
+dependencies = ["matrix-nio>=0.25.2", "aiohttp>=3.13.5", "aiofiles>=25.1.0"]
 
 [project.optional-dependencies]
-e2ee = ["matrix-nio[e2e]>=0.25"]
-dev  = ["pytest", "pytest-asyncio", "ruff"]
+e2ee = ["matrix-nio[e2e]>=0.25.2"]
+dev = ["pytest", "pytest-asyncio", "ruff"]
 
 [project.scripts]
 matrix-signal-adapter = "matrix_signal_adapter.cli:main"
@@ -37,7 +33,7 @@ matrix-signal-adapter = "matrix_signal_adapter.cli:main"
 Homepage = "https://github.com/example/matrix-signal-adapter"
 
 [tool.setuptools]
-package-dir = {"" = "src"}
+package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
