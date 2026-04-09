@@ -178,7 +178,7 @@ Contributing
 ------------
 
 Issues and pull requests are welcome. Note that this project is developed as part of a
-research effort (Vibe) and receives limited maintenance — we still accept contributions
+research effort and receives limited maintenance — we still accept contributions
 and will review PRs when possible.
 
 Developer extras and testing dependencies are declared in `pyproject.toml`.
