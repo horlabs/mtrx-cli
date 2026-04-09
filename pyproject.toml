@@ -3,13 +3,13 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "matrix-signal-adapter"
+name = "mtrx-cli"
 version = "0.2.0"
 description = "A drop-in signal-cli replacement backed by Matrix Chat"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
-authors = [{ name = "matrix-signal-adapter contributors" }]
+authors = [{ name = "mtrx-cli contributors" }]
 keywords = ["signal", "matrix", "cli", "adapter", "wrapper"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -25,19 +25,19 @@ e2ee = ["matrix-nio[e2e]>=0.25.2"]
 dev = ["pytest", "pytest-asyncio", "ruff"]
 
 [project.scripts]
-matrix-signal-adapter = "matrix_signal_adapter.cli:main"
+mtrx-cli = "mtrx_cli.cli:main"
 # Optional: install as 'signal-cli' alias
-# signal-cli = "matrix_signal_adapter.cli:main"
+# signal-cli = "mtrx_cli.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/example/matrix-signal-adapter"
+Homepage = "https://github.com/horlabs/matrix-cli"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["matrix_signal_adapter*"]
+include = ["mtrx_cli*"]
 
 [tool.ruff]
 line-length = 100

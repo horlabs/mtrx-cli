@@ -3,7 +3,7 @@
 signal-cli compatible CLI wrapper backed by Matrix.
 
 Usage (mirrors signal-cli):
-  matrix-signal-adapter [--config CONFIG] [-a ACCOUNT] <command> [options]
+    mtrx-cli [--config CONFIG] [-a ACCOUNT] <command> [options]
 
 Commands:
     send        -m TEXT [RECIPIENT ...] [-g GROUP] [--attachment FILE ...]
@@ -23,10 +23,10 @@ Commands:
   jsonRpc     (reads JSON-RPC from stdin, writes to stdout)
 
 Account flags (analogous to signal-cli):
-  --config  path to config directory (default: ~/.config/matrix-signal-adapter)
+    --config  path to config directory (default: ~/.config/mtrx-cli)
   -a/--account  Matrix user-id, e.g. @user:matrix.org
 
-Configuration file  (~/.config/matrix-signal-adapter/<account>.json):
+Configuration file  (~/.config/mtrx-cli/<account>.json):
   {
     "homeserver": "https://matrix.org",
     "user_id":    "@user:matrix.org",
@@ -41,10 +41,9 @@ import argparse
 import asyncio
 import json
 import logging
-import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional, cast
 
 from .command_handler import CommandHandler
 from .jsonrpc_server import JsonRpcServer
@@ -52,7 +51,7 @@ from .matrix_backend import MatrixBackend
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CONFIG_DIR = Path("~/.config/matrix-signal-adapter").expanduser()
+DEFAULT_CONFIG_DIR = Path("~/.config/mtrx-cli").expanduser()
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +59,7 @@ DEFAULT_CONFIG_DIR = Path("~/.config/matrix-signal-adapter").expanduser()
 # ---------------------------------------------------------------------------
 
 
-def _load_config(config_dir: Path, account: str) -> dict:
+def _load_config(config_dir: Path, account: str) -> Dict[str, Any]:
     """Load JSON config file for the given account."""
     safe = account.lstrip("@").replace(":", "_").replace("/", "_")
     path = config_dir / f"{safe}.json"
@@ -75,13 +74,13 @@ def _load_config(config_dir: Path, account: str) -> dict:
         return json.load(f)
 
 
-def _build_backend(cfg: dict) -> MatrixBackend:
+def _build_backend(cfg: Dict[str, Any]) -> MatrixBackend:
     return MatrixBackend(
-        homeserver=cfg["homeserver"],
-        user_id=cfg["user_id"],
-        password=cfg.get("password"),
-        access_token=cfg.get("access_token"),
-        enable_e2ee=cfg.get("enable_e2ee"),
+        homeserver=cast(str, cfg["homeserver"]),
+        user_id=cast(str, cfg["user_id"]),
+        password=cast(Optional[str], cfg.get("password")),
+        access_token=cast(Optional[str], cfg.get("access_token")),
+        enable_e2ee=cast(Optional[bool], cfg.get("enable_e2ee")),
     )
 
 
@@ -92,7 +91,7 @@ def _build_backend(cfg: dict) -> MatrixBackend:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="matrix-signal-adapter",
+        prog="mtrx-cli",
         description="signal-cli compatible interface backed by Matrix",
     )
     p.add_argument("--config", default=str(DEFAULT_CONFIG_DIR), metavar="CONFIG")
@@ -190,10 +189,10 @@ def _output(obj: Any, mode: str = "plain-text") -> None:
         print(json.dumps(obj, indent=2))
     else:
         if isinstance(obj, list):
-            for item in obj:
+            for item in cast(List[Any], obj):
                 print(item)
         elif isinstance(obj, dict):
-            for k, v in obj.items():
+            for k, v in cast(Dict[str, Any], obj).items():
                 print(f"{k}: {v}")
         else:
             print(obj)
@@ -334,25 +333,27 @@ async def _run(args: argparse.Namespace) -> None:
                 socket_path = (
                     args.socket
                     if isinstance(args.socket, str)
-                    else f"/tmp/matrix-signal-{args.account.lstrip('@').replace(':', '_')}.sock"
+                    else f"/tmp/mtrx-cli-{args.account.lstrip('@').replace(':', '_')}.sock"
                 )
                 await server.run_socket(socket_path)
 
             elif args.tcp:
                 host, _, port_str = (
-                    args.tcp if args.tcp != True else "localhost:7583"
+                    args.tcp if args.tcp is not True else "localhost:7583"
                 ).partition(":")
                 await server.run_tcp(host, int(port_str or 7583))
 
             elif args.http:
                 host, _, port_str = (
-                    args.http if args.http != True else "localhost:8080"
+                    args.http if args.http is not True else "localhost:8080"
                 ).partition(":")
                 await server.run_http(host, int(port_str or 8080))
 
             else:
                 # Default: UNIX socket
-                socket_path = f"/tmp/matrix-signal-{args.account.lstrip('@').replace(':', '_')}.sock"
+                socket_path = (
+                    f"/tmp/mtrx-cli-{args.account.lstrip('@').replace(':', '_')}.sock"
+                )
                 await server.run_socket(socket_path)
 
         elif cmd == "jsonRpc":

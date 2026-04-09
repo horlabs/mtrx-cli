@@ -26,12 +26,13 @@ import logging
 import os
 import signal
 import sys
-from typing import Any, Callable, Coroutine
+from typing import Any, Dict, List, cast
 
 from aiohttp import web
 
 from .command_handler import CommandHandler
 from .matrix_backend import IncomingMessage, MatrixBackend
+from .utils import msg_to_envelope
 
 logger = logging.getLogger(__name__)
 
@@ -43,43 +44,22 @@ def _log_wire_out(channel: str, target: str, text: str) -> None:
     logger.debug("OUT [%s -> %s] %r", channel, target, text)
 
 
-def _ok(id_: Any, result: Any) -> dict:
+def _ok(id_: Any, result: Any) -> Dict[str, Any]:
     return {"jsonrpc": JSONRPC, "id": id_, "result": result}
 
 
-def _err(id_: Any, code: int, message: str, data: Any = None) -> dict:
-    err: dict = {"code": code, "message": message}
+def _err(id_: Any, code: int, message: str, data: Any = None) -> Dict[str, Any]:
+    err: Dict[str, Any] = {"code": code, "message": message}
     if data is not None:
         err["data"] = data
     return {"jsonrpc": JSONRPC, "id": id_, "error": err}
 
 
-def _notification(method: str, params: Any) -> dict:
+def _notification(method: str, params: Any) -> Dict[str, Any]:
     return {"jsonrpc": JSONRPC, "method": method, "params": params}
 
 
-def _msg_to_envelope(msg: IncomingMessage, account: str) -> dict:
-    """Convert IncomingMessage → signal-cli envelope notification format."""
-    envelope: dict[str, Any] = {
-        "timestamp": msg.timestamp,
-        "source": msg.sender,
-        "sourceName": msg.sender_name,
-        "sourceDevice": 1,
-    }
-    data_message: dict[str, Any] = {
-        "timestamp": msg.timestamp,
-        "message": msg.body,
-        "expiresInSeconds": 0,
-        "attachments": msg.attachments,
-    }
-    if msg.is_group:
-        data_message["groupInfo"] = {
-            "groupId": msg.group_id,
-            "groupName": msg.room_name,
-            "type": "DELIVER",
-        }
-    envelope["dataMessage"] = data_message
-    return {"envelope": envelope, "account": account}
+# _msg_to_envelope is provided by utils to avoid import cycles.
 
 
 class JsonRpcServer:
@@ -88,15 +68,15 @@ class JsonRpcServer:
         self.account = account or backend.user_id
         self.handler = CommandHandler(backend, self.account)
         self._writer_lock = asyncio.Lock()
-        self._subscriptions: dict[int, asyncio.Task] = {}
+        self._subscriptions: Dict[int, asyncio.Task[Any]] = {}
 
     # ------------------------------------------------------------------
     # Dispatch a single request dict → result dict
     # ------------------------------------------------------------------
 
-    async def dispatch(self, req: dict) -> dict | None:
+    async def dispatch(self, req: Dict[str, Any]) -> Dict[str, Any] | None:
         method = req.get("method", "")
-        params = req.get("params") or {}
+        params = cast(Dict[str, Any], req.get("params") or {})
         req_id = req.get("id")
 
         # Notification (no id) → fire and forget
@@ -151,7 +131,7 @@ class JsonRpcServer:
                 sys.stdout.flush()
                 continue
 
-            response = await self.dispatch(req)
+            response = await self.dispatch(cast(Dict[str, Any], req))
             if response is not None:
                 line_out = json.dumps(response) + "\n"
                 _log_wire_out("stdio", "stdout", line_out)
@@ -161,8 +141,8 @@ class JsonRpcServer:
     async def _forward_notifications_stdio(self) -> None:
         while True:
             msg: IncomingMessage = await self.backend.message_queue.get()
-            notif = _notification("receive", _msg_to_envelope(msg, self.account))
-            line_out = json.dumps(notif) + "\n"
+            notification = _notification("receive", msg_to_envelope(msg, self.account))
+            line_out = json.dumps(notification) + "\n"
             _log_wire_out("stdio", "stdout", line_out)
             sys.stdout.write(line_out)
             sys.stdout.flush()
@@ -179,7 +159,7 @@ class JsonRpcServer:
         peer = writer.get_extra_info("peername")
         peer_name = str(peer) if peer is not None else "unknown"
 
-        async def send(obj: dict) -> None:
+        async def send(obj: Dict[str, Any]) -> None:
             line_out = json.dumps(obj) + "\n"
             _log_wire_out("socket", peer_name, line_out)
             writer.write(line_out.encode())
@@ -189,9 +169,11 @@ class JsonRpcServer:
         async def push_loop() -> None:
             while True:
                 msg = await self.backend.message_queue.get()
-                notif = _notification("receive", _msg_to_envelope(msg, self.account))
+                notification = _notification(
+                    "receive", msg_to_envelope(msg, self.account)
+                )
                 try:
-                    await send(notif)
+                    await send(notification)
                 except Exception:
                     break
 
@@ -210,7 +192,7 @@ class JsonRpcServer:
                 except json.JSONDecodeError as e:
                     await send(_err(None, -32700, f"Parse error: {e}"))
                     continue
-                resp = await self.dispatch(req)
+                resp = await self.dispatch(cast(Dict[str, Any], req))
                 if resp is not None:
                     await send(resp)
         finally:
@@ -285,11 +267,9 @@ class JsonRpcServer:
             logger.debug(
                 "JSON-RPC batch request: %s", json.dumps(req, separators=(",", ":"))
             )
-            responses: list[dict] = []
-            for item in req:
-                if not isinstance(item, dict):
-                    responses.append(_err(None, -32600, "Invalid Request"))
-                    continue
+            responses: List[Dict[str, Any]] = []
+            req_list = cast(List[Dict[str, Any]], req)
+            for item in req_list:
                 response = await self.dispatch(item)
                 if response is not None:
                     responses.append(response)
@@ -303,10 +283,9 @@ class JsonRpcServer:
         if not isinstance(req, dict):
             return web.json_response(_err(None, -32600, "Invalid Request"), status=400)
 
-        method = req.get("method", "")
         req_json = json.dumps(req, separators=(",", ":"))
         logger.debug("JSON-RPC request: %s", req_json)
-        response = await self.dispatch(req)
+        response = await self.dispatch(cast(Dict[str, Any], req))
         if response is None:
             return web.Response(status=204)
         resp_json = json.dumps(response, separators=(",", ":"))
@@ -369,7 +348,7 @@ class JsonRpcServer:
                     await response.write(frame.encode())
                     continue
 
-                payload_obj = _msg_to_envelope(msg, self.account)
+                payload_obj = msg_to_envelope(msg, self.account)
                 payload = json.dumps(payload_obj, separators=(",", ":"))
                 frame = f"event: receive\ndata: {payload}\n\n"
                 _log_wire_out("sse", client_addr, frame)
@@ -387,8 +366,8 @@ class JsonRpcServer:
         return response
 
     async def _http_index(self, request: web.Request) -> web.Response:
-        payload = {
-            "name": "matrix-signal-adapter",
+        payload: Dict[str, Any] = {
+            "name": "mtrx-cli",
             "mode": "json-rpc",
             "endpoints": {
                 "post": ["/api/v1/rpc", "/api/v1/rpc/", "/"],

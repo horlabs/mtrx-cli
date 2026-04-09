@@ -15,17 +15,15 @@ the adapter layer needs:
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 import mimetypes
-import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional, cast
 
-import aiofiles
-from nio import (
+import aiofiles  # type: ignore[import-untyped]
+from nio import (  # type: ignore[import-untyped]
     AsyncClient,
     AsyncClientConfig,
     InviteEvent,
@@ -45,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class IncomingMessage:
-    """Normalised incoming message, mirrors signal-cli's envelope format."""
+    """Normalized incoming message, mirrors signal-cli's envelope format."""
 
     timestamp: int
     sender: str  # Matrix user-id, e.g. @alice:matrix.org
@@ -53,7 +51,9 @@ class IncomingMessage:
     room_id: str
     room_name: str
     body: str
-    attachments: list[dict] = field(default_factory=list)
+    attachments: List[Dict[str, Any]] = field(
+        default_factory=lambda: cast(List[Dict[str, Any]], [])
+    )
     is_group: bool = False
     group_id: Optional[str] = None  # room_id used as group-id
 
@@ -65,8 +65,8 @@ class MatrixBackend:
         user_id: str,
         password: str | None = None,
         access_token: str | None = None,
-        store_path: str = "~/.local/share/matrix-signal-adapter",
-        device_name: str = "matrix-signal-adapter",
+        store_path: str = "~/.local/share/mtrx-cli",
+        device_name: str = "mtrx-cli",
         enable_e2ee: bool | None = None,
     ):
         self.homeserver = homeserver
@@ -98,14 +98,14 @@ class MatrixBackend:
             config=config,
         )
         self.message_queue: asyncio.Queue[IncomingMessage] = asyncio.Queue()
-        self._sync_task: Optional[asyncio.Task] = None
+        self._sync_task: Optional[asyncio.Task[Any]] = None
         self._logged_in = False
 
         # Register callbacks
         self.client.add_event_callback(self._on_message_text, RoomMessageText)
         self.client.add_event_callback(self._on_message_file, RoomMessageFile)
         self.client.add_event_callback(self._on_message_image, RoomMessageImage)
-        self.client.add_event_callback(self._on_invite, InviteEvent)
+        self.client.add_event_callback(self._on_invite, InviteEvent) # type: ignore
 
     # ------------------------------------------------------------------
     # Auth
@@ -162,9 +162,9 @@ class MatrixBackend:
         room_id: str,
         text: str,
         attachment_paths: list[str] | None = None,
-    ) -> dict:
+    ) -> Dict[str, Any]:
         """Send a text message (and optional attachments) to a Matrix room."""
-        results = []
+        results: List[Any] = []
 
         if text:
             resp = await self.client.room_send(
@@ -240,7 +240,7 @@ class MatrixBackend:
 
         return await self.create_room(name="", invite=[user_id], is_direct=True)
 
-    async def _send_file(self, room_id: str, file_path: str) -> Any:
+    async def _send_file(self, room_id: str, file_path: str) -> Dict[str, Any]:
         path = Path(file_path)
         mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
 
@@ -248,7 +248,7 @@ class MatrixBackend:
             data = await f.read()
 
         up_resp, _ = await self.client.upload(
-            data,
+            cast(Any, data),
             content_type=mime,
             filename=path.name,
             filesize=len(data),
@@ -262,27 +262,30 @@ class MatrixBackend:
         is_image = mime.startswith("image/")
         msgtype = "m.image" if is_image else "m.file"
 
-        content: dict[str, Any] = {
+        content: Dict[str, Any] = {
             "msgtype": msgtype,
             "body": path.name,
             "url": mxc_uri,
             "info": {"mimetype": mime, "size": len(data)},
         }
 
-        return await self.client.room_send(
-            room_id=room_id,
-            message_type="m.room.message",
-            content=content,
+        return cast(
+            Dict[str, Any],
+            await self.client.room_send(
+                room_id=room_id,
+                message_type="m.room.message",
+                content=content,
+            ),
         )
 
     # ------------------------------------------------------------------
     # Rooms / Groups
     # ------------------------------------------------------------------
 
-    async def list_rooms(self) -> list[dict]:
+    async def list_rooms(self) -> List[Dict[str, Any]]:
         """Return all joined rooms as group-like dicts."""
         await self.client.sync(timeout=5000)
-        rooms = []
+        rooms: List[Dict[str, Any]] = []
         for room_id, room in self.client.rooms.items():
             members = list(room.users.keys())
             rooms.append(
@@ -291,9 +294,7 @@ class MatrixBackend:
                     "name": room.display_name or room_id,
                     "members": members,
                     "member_count": len(members),
-                    "is_direct": (
-                        room.is_direct if hasattr(room, "is_direct") else False
-                    ),
+                    "is_direct": bool(getattr(room, "is_direct", False)),
                 }
             )
         return rooms
@@ -398,14 +399,14 @@ class MatrixBackend:
         room: MatrixRoom,
         sender: str,
         body: str,
-        attachments: list[dict] | None = None,
+        attachments: Optional[List[Dict[str, Any]]] = None,
     ) -> IncomingMessage:
         members = list(room.users.keys())
         is_group = len(members) > 2
         return IncomingMessage(
             timestamp=int(time.time() * 1000),
             sender=sender,
-            sender_name=room.user_name(sender) if sender in room.users else sender,
+            sender_name=(room.user_name(sender) or sender) if sender in room.users else sender,
             room_id=room.room_id,
             room_name=room.display_name or room.room_id,
             body=body,
@@ -414,7 +415,7 @@ class MatrixBackend:
             group_id=room.room_id if is_group else None,
         )
 
-    async def _on_message_text(self, room: MatrixRoom, event: RoomMessageText) -> None:
+    async def _on_message_text(self, room: MatrixRoom, event: Any) -> None:
         if event.sender == self.user_id:
             return  # skip own messages
         msg = self._make_incoming(room, event.sender, event.body)
@@ -426,14 +427,15 @@ class MatrixBackend:
         )
         await self.message_queue.put(msg)
 
-    async def _on_message_file(self, room: MatrixRoom, event: RoomMessageFile) -> None:
+    async def _on_message_file(self, room: MatrixRoom, event: Any) -> None:
         if event.sender == self.user_id:
             return
         mxc = getattr(event, "url", "")
-        att = {
-            "contentType": event.source.get("content", {})
-            .get("info", {})
-            .get("mimetype", "application/octet-stream"),
+        src = cast(Dict[str, Any], getattr(event, "source", {}))
+        content = cast(Dict[str, Any], src.get("content", {}))
+        info = cast(Dict[str, Any], content.get("info", {}))
+        att: Dict[str, Any] = {
+            "contentType": info.get("mimetype", "application/octet-stream"),
             "filename": event.body,
             "url": mxc,
         }
@@ -443,19 +445,21 @@ class MatrixBackend:
         )
         await self.message_queue.put(msg)
 
-    async def _on_message_image(
-        self, room: MatrixRoom, event: RoomMessageImage
-    ) -> None:
+    async def _on_message_image(self, room: MatrixRoom, event: Any) -> None:
         if event.sender == self.user_id:
             return
         mxc = getattr(event, "url", "")
-        att = {"contentType": "image/jpeg", "filename": event.body, "url": mxc}
+        att: Dict[str, Any] = {
+            "contentType": "image/jpeg",
+            "filename": event.body,
+            "url": mxc,
+        }
         msg = self._make_incoming(room, event.sender, event.body, [att])
         logger.debug(
             "Message callback: queuing image from %s: %s", event.sender, event.body
         )
         await self.message_queue.put(msg)
 
-    async def _on_invite(self, room: MatrixRoom, event: InviteEvent) -> None:
+    async def _on_invite(self, room: MatrixRoom, event: Any) -> None:
         logger.info("Auto-joining invited room %s", room.room_id)
         await self.client.join(room.room_id)
