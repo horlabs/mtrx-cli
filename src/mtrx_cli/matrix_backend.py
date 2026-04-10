@@ -37,6 +37,7 @@ from nio import (  # type: ignore[import-untyped]
     UploadError,
     UploadResponse,
 )
+from nio.exceptions import OlmUnverifiedDeviceError  # type: ignore[import-untyped]
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,11 @@ class MatrixBackend:
             store_sync_tokens=True,
             encryption_enabled=encryption_enabled,
         )
+        if not encryption_enabled:
+            logger.warning(
+                "Matrix E2EE support disabled (olm not available). "
+                "Encrypted room messages may not be received as plaintext callbacks."
+            )
         self.client = AsyncClient(
             homeserver=self.homeserver,
             user=self.user_id,
@@ -167,7 +173,7 @@ class MatrixBackend:
         results: List[Any] = []
 
         if text:
-            resp = await self.client.room_send(
+            resp = await self._room_send_with_unverified_fallback(
                 room_id=room_id,
                 message_type="m.room.message",
                 content={"msgtype": "m.text", "body": text},
@@ -179,6 +185,33 @@ class MatrixBackend:
             results.append(resp)
 
         return {"results": [str(r) for r in results]}
+
+    async def _room_send_with_unverified_fallback(
+        self,
+        room_id: str,
+        message_type: str,
+        content: Dict[str, Any],
+    ) -> Any:
+        """Send a room event and retry once if unverified devices block encryption."""
+        try:
+            return await self.client.room_send(
+                room_id=room_id,
+                message_type=message_type,
+                content=content,
+            )
+        except OlmUnverifiedDeviceError as exc:
+            logger.warning(
+                "Unverified device blocked encrypted send in room %s; "
+                "retrying with ignore_unverified_devices=True (%s)",
+                room_id,
+                exc,
+            )
+            return await self.client.room_send(
+                room_id=room_id,
+                message_type=message_type,
+                content=content,
+                ignore_unverified_devices=True,
+            )
 
     async def resolve_recipient_to_room(self, recipient: str) -> str:
         """
@@ -271,7 +304,7 @@ class MatrixBackend:
 
         return cast(
             Dict[str, Any],
-            await self.client.room_send(
+            await self._room_send_with_unverified_fallback(
                 room_id=room_id,
                 message_type="m.room.message",
                 content=content,
@@ -352,6 +385,16 @@ class MatrixBackend:
             logger.debug("Sync daemon already running")
             return
 
+        if self._sync_task and self._sync_task.done():
+            if self._sync_task.cancelled():
+                logger.warning("Sync daemon task was cancelled; restarting")
+            else:
+                exc = self._sync_task.exception()
+                if exc is not None:
+                    logger.warning("Sync daemon task ended with error; restarting: %s", exc)
+                else:
+                    logger.warning("Sync daemon task ended unexpectedly; restarting")
+
         logger.info("Starting sync daemon")
         self._sync_task = asyncio.create_task(self._sync_loop())
         logger.info("Matrix sync daemon started")
@@ -365,14 +408,18 @@ class MatrixBackend:
                 pass
 
     async def _sync_loop(self) -> None:
-        try:
-            logger.info("Sync loop starting")
-            await self.client.sync_forever(timeout=30_000, full_state=True)
-        except asyncio.CancelledError:
-            logger.info("Sync loop cancelled")
-            raise
-        except Exception as e:
-            logger.error("Sync loop crashed: %s", e, exc_info=True)
+        logger.info("Sync loop starting")
+        while True:
+            try:
+                await self.client.sync_forever(timeout=30_000, full_state=True)
+                logger.warning("sync_forever returned unexpectedly; restarting in 2s")
+            except asyncio.CancelledError:
+                logger.info("Sync loop cancelled")
+                raise
+            except Exception as e:
+                logger.error("Sync loop crashed, retrying in 2s: %s", e, exc_info=True)
+
+            await asyncio.sleep(2)
 
     async def sync_once(
         self,

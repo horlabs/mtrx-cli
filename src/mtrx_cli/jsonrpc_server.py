@@ -314,8 +314,8 @@ class JsonRpcServer:
         )
         await response.prepare(request)
 
-        # signal-cli style: keepalive comment line.
-        frame = ":\n"
+        # Keep explicit comment text for clients that surface keepalive lines.
+        frame = ": connected\n\n"
         _log_wire_out("sse", client_addr, frame)
         await response.write(frame.encode())
         logger.debug("SSE initial keepalive sent to %s", client_addr)
@@ -334,6 +334,8 @@ class JsonRpcServer:
                         msg.body[:50],
                     )
                 except asyncio.TimeoutError:
+                    # Recover from a crashed sync loop while the SSE client is connected.
+                    await self.backend.start_daemon()
                     # Keep the SSE stream active and visible for curl -N.
                     keepalive_count += 1
                     if keepalive_count % 4 == 0:  # Log every 4th keepalive (60s)
@@ -343,7 +345,7 @@ class JsonRpcServer:
                             client_addr,
                             self.backend.message_queue.qsize(),
                         )
-                    frame = ":\n"
+                    frame = ": keepalive\n\n"
                     _log_wire_out("sse", client_addr, frame)
                     await response.write(frame.encode())
                     continue
