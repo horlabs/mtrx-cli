@@ -111,7 +111,7 @@ class MatrixBackend:
         self.client.add_event_callback(self._on_message_text, RoomMessageText)
         self.client.add_event_callback(self._on_message_file, RoomMessageFile)
         self.client.add_event_callback(self._on_message_image, RoomMessageImage)
-        self.client.add_event_callback(self._on_invite, InviteEvent) # type: ignore
+        self.client.add_event_callback(self._on_invite, InviteEvent)  # type: ignore
 
     # ------------------------------------------------------------------
     # Auth
@@ -391,7 +391,9 @@ class MatrixBackend:
             else:
                 exc = self._sync_task.exception()
                 if exc is not None:
-                    logger.warning("Sync daemon task ended with error; restarting: %s", exc)
+                    logger.warning(
+                        "Sync daemon task ended with error; restarting: %s", exc
+                    )
                 else:
                     logger.warning("Sync daemon task ended unexpectedly; restarting")
 
@@ -448,12 +450,15 @@ class MatrixBackend:
         body: str,
         attachments: Optional[List[Dict[str, Any]]] = None,
     ) -> IncomingMessage:
-        members = list(room.users.keys())
-        is_group = len(members) > 2
+        # Prefer Matrix direct-room metadata; member-count heuristics misclassify
+        # freshly created small groups (often 1-2 members initially).
+        is_group = not bool(getattr(room, "is_direct", False))
         return IncomingMessage(
             timestamp=int(time.time() * 1000),
             sender=sender,
-            sender_name=(room.user_name(sender) or sender) if sender in room.users else sender,
+            sender_name=(
+                (room.user_name(sender) or sender) if sender in room.users else sender
+            ),
             room_id=room.room_id,
             room_name=room.display_name or room.room_id,
             body=body,

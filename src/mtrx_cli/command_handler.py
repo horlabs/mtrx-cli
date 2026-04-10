@@ -271,7 +271,8 @@ class CommandHandler:
         members: List[str] = []
         if isinstance(raw_members, str):
             members = [raw_members]
-        members = [str(m) for m in raw_members if m is not None]
+        else:
+            members = [str(m) for m in raw_members if m is not None]
         room_id = await self.backend.create_room(name=name, invite=members)
         return {"groupId": room_id}
 
@@ -294,7 +295,8 @@ class CommandHandler:
         members: List[str] = []
         if isinstance(raw_members, str):
             members = [raw_members]
-        members = [str(m) for m in raw_members if m is not None]
+        else:
+            members = [str(m) for m in raw_members if m is not None]
         for uid in members:
             await self.backend.invite_user(room_id, uid)
 
