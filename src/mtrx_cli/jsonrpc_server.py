@@ -21,6 +21,7 @@ Wire format: newline-delimited JSON (same as signal-cli):
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import json
 import logging
 import os
@@ -109,34 +110,39 @@ class JsonRpcServer:
         await self.backend.start_daemon()
 
         # Background: forward incoming messages to stdout
-        asyncio.create_task(self._forward_notifications_stdio())
+        forward_task = asyncio.create_task(self._forward_notifications_stdio())
 
-        while True:
-            try:
-                line = await reader.readline()
-            except Exception:
-                break
-            if not line:
-                break
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                req = json.loads(line)
-            except json.JSONDecodeError as e:
-                parse_error = _err(None, -32700, f"Parse error: {e}")
-                line_out = json.dumps(parse_error) + "\n"
-                _log_wire_out("stdio", "stdout", line_out)
-                sys.stdout.write(line_out)
-                sys.stdout.flush()
-                continue
+        try:
+            while True:
+                try:
+                    line = await reader.readline()
+                except Exception:
+                    break
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    req = json.loads(line)
+                except json.JSONDecodeError as e:
+                    parse_error = _err(None, -32700, f"Parse error: {e}")
+                    line_out = json.dumps(parse_error) + "\n"
+                    _log_wire_out("stdio", "stdout", line_out)
+                    sys.stdout.write(line_out)
+                    sys.stdout.flush()
+                    continue
 
-            response = await self.dispatch(cast(Dict[str, Any], req))
-            if response is not None:
-                line_out = json.dumps(response) + "\n"
-                _log_wire_out("stdio", "stdout", line_out)
-                sys.stdout.write(line_out)
-                sys.stdout.flush()
+                response = await self.dispatch(cast(Dict[str, Any], req))
+                if response is not None:
+                    line_out = json.dumps(response) + "\n"
+                    _log_wire_out("stdio", "stdout", line_out)
+                    sys.stdout.write(line_out)
+                    sys.stdout.flush()
+        finally:
+            forward_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await forward_task
 
     async def _forward_notifications_stdio(self) -> None:
         while True:

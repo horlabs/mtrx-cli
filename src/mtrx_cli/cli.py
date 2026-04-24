@@ -18,6 +18,14 @@ Commands:
   sendTyping  (-r ROOM | -g GROUP) [--stop]
   sendReaction (-r ROOM | -g GROUP) -e EMOJI --target-timestamp TS
   deleteMessage (-r ROOM | -g GROUP) --target-timestamp TS
+    listDevices
+    listIdentities [RECIPIENT]
+    trust --recipient USER [--device-id DEVICE | --trust-all-known-keys]
+    listVerifications [RECIPIENT]
+    startVerification --recipient USER --device-id DEVICE
+    acceptVerification --transaction-id TX
+    confirmVerification --transaction-id TX
+    cancelVerification --transaction-id TX [--reject]
   version
   daemon      [--socket [PATH]] [--tcp [HOST:PORT]] [--http [HOST:PORT]]
   jsonRpc     (reads JSON-RPC from stdin, writes to stdout)
@@ -41,6 +49,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, cast
@@ -75,11 +84,16 @@ def _load_config(config_dir: Path, account: str) -> Dict[str, Any]:
 
 
 def _build_backend(cfg: Dict[str, Any]) -> MatrixBackend:
+    user_id = cast(str, cfg["user_id"])
+    safe_user = user_id.lstrip("@").replace(":", "_").replace("/", "_")
+    default_store = Path("~/.local/share/mtrx-cli").expanduser() / safe_user
+
     return MatrixBackend(
         homeserver=cast(str, cfg["homeserver"]),
-        user_id=cast(str, cfg["user_id"]),
+        user_id=user_id,
         password=cast(Optional[str], cfg.get("password")),
         access_token=cast(Optional[str], cfg.get("access_token")),
+        store_path=cast(str, cfg.get("store_path") or str(default_store)),
         enable_e2ee=cast(Optional[bool], cfg.get("enable_e2ee")),
     )
 
@@ -141,6 +155,9 @@ def build_parser() -> argparse.ArgumentParser:
     # ---- listContacts ----
     sub.add_parser("listContacts", help="List known Matrix users")
 
+    # ---- listDevices ----
+    sub.add_parser("listDevices", help="List own Matrix devices")
+
     # ---- updateProfile ----
     sp = sub.add_parser("updateProfile", help="Update display name")
     sp.add_argument("--name", required=True)
@@ -163,6 +180,38 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("-r", "--recipient", metavar="ROOM")
     sp.add_argument("-g", "--group-id", metavar="GROUP")
     sp.add_argument("--target-timestamp", required=True, metavar="TS")
+
+    # ---- listIdentities ----
+    sp = sub.add_parser("listIdentities", help="List E2EE devices/identities")
+    sp.add_argument("recipient", nargs="?", metavar="RECIPIENT")
+
+    # ---- trust ----
+    sp = sub.add_parser("trust", help="Mark Matrix device keys as trusted")
+    sp.add_argument("--recipient", required=True, metavar="USER")
+    sp.add_argument("--device-id", metavar="DEVICE")
+    sp.add_argument("--trust-all-known-keys", action="store_true")
+
+    # ---- listVerifications ----
+    sp = sub.add_parser("listVerifications", help="List active SAS verifications")
+    sp.add_argument("recipient", nargs="?", metavar="RECIPIENT")
+
+    # ---- startVerification ----
+    sp = sub.add_parser("startVerification", help="Start interactive SAS verification")
+    sp.add_argument("--recipient", required=True, metavar="USER")
+    sp.add_argument("--device-id", required=True, metavar="DEVICE")
+
+    # ---- acceptVerification ----
+    sp = sub.add_parser("acceptVerification", help="Accept incoming SAS verification")
+    sp.add_argument("--transaction-id", required=True, metavar="TX")
+
+    # ---- confirmVerification ----
+    sp = sub.add_parser("confirmVerification", help="Confirm SAS emoji/decimal match")
+    sp.add_argument("--transaction-id", required=True, metavar="TX")
+
+    # ---- cancelVerification ----
+    sp = sub.add_parser("cancelVerification", help="Cancel SAS verification")
+    sp.add_argument("--transaction-id", required=True, metavar="TX")
+    sp.add_argument("--reject", action="store_true")
 
     # ---- version ----
     sub.add_parser("version", help="Print version")
@@ -294,6 +343,10 @@ async def _run(args: argparse.Namespace) -> None:
             result = await handler.handle("listContacts", {}, args.account)
             _output(result, output_mode)
 
+        elif cmd == "listDevices":
+            result = await handler.handle("listDevices", {}, args.account)
+            _output(result, output_mode)
+
         elif cmd == "updateProfile":
             await handler.handle("updateProfile", {"name": args.name}, args.account)
 
@@ -325,6 +378,72 @@ async def _run(args: argparse.Namespace) -> None:
                 },
                 args.account,
             )
+
+        elif cmd == "listIdentities":
+            result = await handler.handle(
+                "listIdentities",
+                {"recipient": getattr(args, "recipient", None)},
+                args.account,
+            )
+            _output(result, output_mode)
+
+        elif cmd == "trust":
+            result = await handler.handle(
+                "trust",
+                {
+                    "recipient": args.recipient,
+                    "deviceId": getattr(args, "device_id", None),
+                    "trustAllKnownKeys": bool(args.trust_all_known_keys),
+                },
+                args.account,
+            )
+            _output(result, output_mode)
+
+        elif cmd == "listVerifications":
+            result = await handler.handle(
+                "listVerifications",
+                {"recipient": getattr(args, "recipient", None)},
+                args.account,
+            )
+            _output(result, output_mode)
+
+        elif cmd == "startVerification":
+            result = await handler.handle(
+                "startVerification",
+                {
+                    "recipient": args.recipient,
+                    "deviceId": args.device_id,
+                },
+                args.account,
+            )
+            _output(result, output_mode)
+
+        elif cmd == "acceptVerification":
+            result = await handler.handle(
+                "acceptVerification",
+                {"transactionId": args.transaction_id},
+                args.account,
+            )
+            _output(result, output_mode)
+
+        elif cmd == "confirmVerification":
+            result = await handler.handle(
+                "confirmVerification",
+                {"transactionId": args.transaction_id},
+                args.account,
+            )
+            _output(result, output_mode)
+
+        elif cmd == "cancelVerification":
+            result = await handler.handle(
+                "cancelVerification",
+                {
+                    "transactionId": args.transaction_id,
+                    "reject": bool(args.reject),
+                },
+                args.account,
+            )
+            _output(result, output_mode)
 
         elif cmd == "daemon":
             server = JsonRpcServer(backend, args.account)
@@ -364,6 +483,7 @@ async def _run(args: argparse.Namespace) -> None:
             sys.exit(f"Unknown command: {cmd}")
 
     finally:
+        await backend.stop_daemon()
         await backend.logout()
 
 
@@ -384,8 +504,12 @@ def main() -> None:
     # Suppress nio schema validation warnings (next_batch, etc.)
     logging.getLogger("nio.responses").setLevel(logging.WARNING)
     logging.getLogger("nio").setLevel(logging.WARNING)
+    logging.getLogger("peewee").setLevel(logging.WARNING)
 
-    asyncio.run(_run(args))
+    try:
+        asyncio.run(_run(args))
+    except KeyboardInterrupt:
+        logger.info("Interrupted, shutting down")
 
 
 if __name__ == "__main__":
